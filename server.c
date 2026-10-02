@@ -39,13 +39,13 @@ typedef struct{
 //allocates memory in users array
 //Adds user struct to that new allocated memory 
 //Prompts user to enter password
-void handleClientJoin(SOCKET listen_socket, User **users, size_t *usersLength);
+void handleClientJoin(SOCKET listen_socket, User **users, size_t *usersLength, size_t *usersCapacity);
 
 //Removes client from room (if inside one) using function "removeClientfromRoom"
 //Removes client from users array
 //by shifting the user to the very end of the array
 //and lowering the usersLength value
-void handleClientLeave(User **users, size_t *usersLength, size_t userIndex, Room **rooms, size_t *roomsLength);
+void handleClientLeave(User **users, size_t *usersLength, size_t userIndex, Room **rooms, size_t *roomsLength, size_t *roomsCapacity);
 
 //Looks through a room to find the index of a socket
 //This is used when removing a client from a room, since the client's
@@ -60,7 +60,7 @@ void removeClientSocket(size_t clientSocketIndex, Room *connectedRoom);
 
 //Adds a existing room struct into the rooms array
 //by allocating new memory to it
-void addRoom(Room newRoom, Room **rooms, size_t *roomsLength, size_t *roomsCreated);
+void addRoom(Room newRoom, Room **rooms, size_t *roomsLength, size_t *roomsCreated, size_t *roomsCapacity);
 
 //Adds the user to a room and assigns users connectedRoomID to the roomsID
 //does this by allocating new memory to the rooms connectedClientSockets array
@@ -70,9 +70,14 @@ void joinRoom(User *user, Room *room);
 //                            ^ the one the user has given it
 void createRoom(Room *newRoom, size_t roomsCreated, char password[DEFAULT_BUFFERSIZE]);
 
-//Deletes a room by performing the shifting
-//and then reallocating the rooms array memory (removing the size of one Room)
-void deleteRoom(Room **rooms, Room *room, size_t *roomLength, size_t roomIndex);
+//Deletes a room, replaces the room that needs to be deleted by the last element
+//and then removing the last element
+//e.g. Room1, room2, room3, room4, we want to delete room2
+//Step 1. replace room with last room
+//Room1, room4, room3, room4
+//Step2. remove last element
+//Room1, room4, room3
+void deleteRoom(Room **rooms, Room *room, size_t *roomLength, size_t *roomCapacity, size_t roomIndex);
 
 //loops through rooms to find a room with the same ID as given
 //then returns the id of the room that it found
@@ -83,7 +88,7 @@ bool findRoomIndexbyID(size_t id, Room *rooms, size_t roomsLength, size_t *roomI
 //The actual function that does the removal
 //of client's socket in the connectedClientSockets
 //in a seperate function for readability
-void removeClientfromRoom(User **users, size_t *usersLength, Room **rooms, size_t *roomsLength, size_t userIndex);
+void removeClientfromRoom(User **users, size_t *usersLength, Room **rooms, size_t *roomsLength, size_t *roomsCapacity, size_t userIndex);
 
 //Send a message to all connected Client (sockets) in a room
 //loops through every socket in the rooms connectedClientSockets
@@ -93,20 +98,27 @@ void sendMessageinRoom(Room connectedRoom, char message[DEFAULT_BUFFERSIZE], int
 //Same as above but it also sends it to the sender.
 void sendSYSMessageinRoom(Room connectedRoom, char message[DEFAULT_BUFFERSIZE], size_t messageLength);
 
-//Dynamic arrays
-
-size_t roomsCreated = 0;
-size_t roomsLength = 0;
-Room *rooms = NULL;
-
-size_t usersLength = 0;
-User *users = NULL;
-
-fd_set readfds;
+//Free's up all the allocated memory
+void cleanUp(struct addrinfo **result, User **users, size_t usersLength, Room **rooms, size_t roomsLength, SOCKET listenSocket);
 
 int main(){
+
+    //Dynamic arrays
+
+    size_t roomsCreated = 0;
+    size_t roomsLength = 0;
+    size_t roomsCapacity = 0;
+    Room *rooms = NULL;
+
+    size_t usersLength = 0;
+    size_t usersCapacity = 0;
+    User *users = NULL;
+
+    fd_set readfds;
     //Set up winsock and listening Socket
 
+
+    
     WSADATA wsaData;
     int iResult;
     iResult = WSAStartup(MAKEWORD(2, 2), &wsaData);
@@ -125,14 +137,25 @@ int main(){
     listen_socket = socket(result->ai_family, result->ai_socktype, result->ai_protocol);
     if(listen_socket == INVALID_SOCKET){
         printf("ERROR: ListenSocket error \n");
+        freeaddrinfo(result);
+        WSACleanup();
+        return 1;
     }
 
     iResult = bind(listen_socket,result->ai_addr, (int)result->ai_addrlen);
     if(iResult == SOCKET_ERROR){
         printf("ERROR: Binding error \n");
+        freeaddrinfo(result);
+        WSACleanup();
+        closesocket(listen_socket);
+        return 1;
     }
     if(listen(listen_socket, SOMAXCONN) == SOCKET_ERROR){
         printf("ERROR: Listen error \n");
+        freeaddrinfo(result);
+        WSACleanup();
+        closesocket(listen_socket);
+        return 1;
     }
 
     // Winsock and listen socket has been set up without error
@@ -164,7 +187,7 @@ int main(){
         if(FD_ISSET(listen_socket, &readfds)){
             //Client wants to connect
             //Add client to users dynamic array
-            handleClientJoin(listen_socket, &users, &usersLength);
+            handleClientJoin(listen_socket, &users, &usersLength, &usersCapacity);
         }
 
         //Looping through clients to detect sent packets
@@ -188,7 +211,7 @@ int main(){
 
                     //remove client from any servers they were in (connectedClientSockets)
                     //clear memory client has taken (so in users and connectedClientSockets)
-                    handleClientLeave(&users, &usersLength, i, &rooms, &roomsLength);
+                    handleClientLeave(&users, &usersLength, i, &rooms, &roomsLength, &roomsCapacity);
                     i--;
                     continue;
                 }
@@ -232,7 +255,13 @@ int main(){
                             //This function will allocate memory in the connectedClientSockets array inside of 
                             //The room, it will also assign the connectedRoomId of the user to the roomID of the Room.
                             joinRoom(currentUser, &rooms[j]);
-                            break;
+                                printf("MSG: Found room \n");
+                                char message[512] = "[SYSTEM] Room Found! You have Joined the room. \n";
+                                sendSYSMessageinRoom(rooms[j], message, strlen(message));
+
+                                char message2[512] = "[SYSTEM] A User has joined your room. \n";
+                                sendMessageinRoom(rooms[j], message2, strlen(message2), *currentUser);
+                                break;
                         }
                         char message[DEFAULT_BUFFERSIZE] = "[SYSTEM] Room Found! However it is full. \n";
                         sendSYSMessageinRoom(rooms[j], message, DEFAULT_BUFFERSIZE);
@@ -248,13 +277,13 @@ int main(){
                 if(foundRoom == false){
                     printf("Room not found, creating a new room \n");
                     char message[DEFAULT_BUFFERSIZE] = "[SYSTEM] Room not found, new room created. \n";
-                    send(currentSocket, message, DEFAULT_BUFFERSIZE, 0);
+                    send(currentSocket, message, strlen(message), 0);
                     //create a room with the password
 
                     Room newRoom;
                     createRoom(&newRoom, roomsCreated, recvBuffer); // Create a blank room with the given password
-                    addRoom(newRoom, &rooms, &roomsLength, &roomsCreated); // Add the room to the rooms array
-                    joinRoom(currentUser, &(rooms[roomsLength])); // assign the room's creator to that room
+                    addRoom(newRoom, &rooms, &roomsLength, &roomsCreated, &roomsCapacity); // Add the room to the rooms array
+                    joinRoom(currentUser, &(rooms[roomsLength - 1])); // assign the room's creator to that room
 
                 }
                 
@@ -265,32 +294,17 @@ int main(){
 
     //Clean up
     //free's up all the allocated memory
-
-    freeaddrinfo(result);
-    WSACleanup();
-    for(size_t i = 0; i < usersLength; i++){
-        closesocket(users[i].clientSocket);
-    }
-    free(users);
-
-    for(size_t i = 0; i < roomsLength; i++){
-        for(size_t j = 0; j < rooms[i].numberOfConnectedSockets; j++){
-            closesocket(rooms[i].connectedClientSockets[j]);
-        }
-        free(rooms[i].connectedClientSockets);
-    }
-    free(rooms);
+    cleanUp(&result, &users, usersLength, &rooms, roomsLength, listen_socket);
 
     return 0;
 }
-
 
 //Creates a clientSocket for the client
 //Creates a user based on that clientSocket
 //allocates memory in users array
 //Adds user struct to that new allocated memory 
 //Prompts user to enter password
-void handleClientJoin(SOCKET listen_socket, User **users, size_t *usersLength){
+void handleClientJoin(SOCKET listen_socket, User **users, size_t *usersLength, size_t *usersCapacity){
     //Create client socket
 
     printf("Client wants to connect \n");
@@ -302,18 +316,21 @@ void handleClientJoin(SOCKET listen_socket, User **users, size_t *usersLength){
     }
     printf("Client socket is valid \n");
 
-    //Allocate new memory in users array
-
-    User *temp = realloc((*users), sizeof(User) * ((*usersLength) + 1));
-    if(temp == NULL){
-        printf("ERROR: Re allocation user space error \n");
-        return;
+    //If users is full
+    //allocate new memory
+    if((*usersLength) == (*usersCapacity)){
+        User *temp = realloc((*users), sizeof(User) * ((*usersLength) + 1));
+        if(temp == NULL){
+            printf("ERROR: Re allocation user space error \n");
+            return;
+        }
+        (*usersCapacity)++;
+        (*users) = temp;
+        printf("Users reallocation is valid \n");
     }
 
     //Add user to the new memory
 
-    printf("Users reallocation is valid \n");
-    (*users) = temp;
     (*users)[(*usersLength)].clientSocket = clientSocket;
     (*users)[(*usersLength)].connectedRoomID = SIZE_MAX; // The placeholder val
     (*usersLength)++;
@@ -328,7 +345,7 @@ void handleClientJoin(SOCKET listen_socket, User **users, size_t *usersLength){
 //so that the client socket that needs to be removed is last
 //remove the size of the user struct's worth of memory at the end of the array
 //Delete's room if there are no sockets
-void removeClientfromRoom(User **users, size_t *usersLength, Room **rooms, size_t *roomsLength, size_t userIndex){
+void removeClientfromRoom(User **users, size_t *usersLength,  Room **rooms, size_t *roomsLength, size_t *roomsCapacity, size_t userIndex){
     size_t connectedRoomIndex;
     bool found = findRoomIndexbyID((*users)[userIndex].connectedRoomID, (*rooms), (*roomsLength), &connectedRoomIndex);
     if(found == false){
@@ -348,22 +365,35 @@ void removeClientfromRoom(User **users, size_t *usersLength, Room **rooms, size_
     char message[512] = "[SYSTEM] Other user has disconnected. They can join back (or a new user) using the same password. \n";
     sendSYSMessageinRoom((*connectedRoom), message, strlen(message));
 
+    printf(
+        "DEBUG: roomsLength = %zu, roomsCapacity = %zu\n",
+        *roomsLength,
+        *roomsCapacity
+    );
+
     if(connectedRoom->numberOfConnectedSockets == 0){
         //delete room
-        deleteRoom(rooms, connectedRoom, roomsLength, connectedRoomIndex);
+        deleteRoom(rooms, connectedRoom, roomsLength, roomsCapacity, connectedRoomIndex);
     }
+
+    printf(
+        "DEBUG: roomsLength = %zu, roomsCapacity = %zu\n",
+        *roomsLength,
+        *roomsCapacity
+    );
+
 }
 
 //Removes client from room (if inside one) using function "removeClientfromRoom"
 //Removes client from users array
 //by shifting the user to the very end of the array
 //and lowering the usersLength value
-void handleClientLeave(User **users, size_t *usersLength, size_t userIndex, Room **rooms, size_t *roomsLength){
+void handleClientLeave(User **users, size_t *usersLength, size_t userIndex, Room **rooms, size_t *roomsLength, size_t *roomsCapacity){
         printf("MSG: Client wants to leave \n");
 
         //Explenation on this if statement is found earlier
         if((*users)[userIndex].connectedRoomID != SIZE_MAX){
-            removeClientfromRoom(users, usersLength, rooms, roomsLength, userIndex);
+            removeClientfromRoom(users, usersLength, rooms, roomsLength, roomsCapacity, userIndex);
         }
 
         closesocket((*users)[userIndex].clientSocket);
@@ -389,11 +419,8 @@ bool findClientSocket(SOCKET socket, Room room, size_t *socketIndex){
 //The actual function that does the removal
 //of client's socket in the connectedClientSockets
 void removeClientSocket(size_t clientSocketIndex, Room *connectedRoom){
-    for(size_t j = clientSocketIndex; j < connectedRoom->numberOfConnectedSockets - 1; j++){
-        connectedRoom->connectedClientSockets[j] = connectedRoom->connectedClientSockets[j+1];
-    }
-
     connectedRoom->numberOfConnectedSockets--;
+    connectedRoom->connectedClientSockets[clientSocketIndex] = connectedRoom->connectedClientSockets[connectedRoom->numberOfConnectedSockets];
     if(connectedRoom->numberOfConnectedSockets <= 0){
         free(connectedRoom->connectedClientSockets);
         connectedRoom->connectedClientSockets = NULL;
@@ -410,19 +437,25 @@ void removeClientSocket(size_t clientSocketIndex, Room *connectedRoom){
 
 //Adds a existing room struct into the rooms array
 //by allocating new memory to it
-void addRoom(Room newRoom, Room **rooms, size_t *roomsLength, size_t *roomsCreated){
-
+void addRoom(Room newRoom, Room **rooms, size_t *roomsLength, size_t *roomsCreated, size_t *roomsCapacity){
 
     //Allocation
-    Room *temp = realloc((*rooms), sizeof(Room) * ((*roomsLength) + 1));
-    if(temp == NULL){
-        printf("ERROR: Reallocating rooms error \n");
-        return;
+
+    //if rooms is full
+    //allocate new memory
+    if((*roomsLength) == (*roomsCapacity)){
+        Room *temp = realloc((*rooms), sizeof(Room) * ((*roomsLength) + 1));
+        if(temp == NULL){
+            printf("ERROR: Reallocating rooms error \n");
+            return;
+        }
+        (*roomsCapacity)++;
+        (*rooms) = temp;
+        printf("SUCC: Room reallocation successfull \n");
     }
 
     //Assignment
-    printf("SUCC: Room reallocation successfull \n");
-    (*rooms) = temp;
+
     (*rooms)[(*roomsLength)] = newRoom;
     (*roomsLength)++;
     (*roomsCreated)++;
@@ -433,7 +466,6 @@ void addRoom(Room newRoom, Room **rooms, size_t *roomsLength, size_t *roomsCreat
 //does this by allocating new memory to the rooms connectedClientSockets array
 void joinRoom(User *user, Room *room){
     printf("MSG: User is joining a room \n");
-    (*user).connectedRoomID = (*room).roomID;
 
     //Allocation
     SOCKET *temp = realloc((*room).connectedClientSockets, sizeof(SOCKET) * ((*room).numberOfConnectedSockets + 1));
@@ -444,16 +476,12 @@ void joinRoom(User *user, Room *room){
 
     //assignment
     printf("SUCC: User joining has been successfull.");
+    (*user).connectedRoomID = (*room).roomID;
     (*room).connectedClientSockets = temp;
     (*room).connectedClientSockets[(*room).numberOfConnectedSockets] = (*user).clientSocket;
     (*room).numberOfConnectedSockets++;
 
-    printf("MSG: Found room \n");
-    char message[512] = "[SYSTEM] Room Found! You have Joined the room. \n";
-    sendSYSMessageinRoom((*room), message, strlen(message));
 
-    char message2[512] = "[SYSTEM] A User has joined your room. \n";
-    sendSYSMessageinRoom((*room), message2, strlen(message2));
         
 }
 
@@ -462,38 +490,37 @@ void joinRoom(User *user, Room *room){
 void createRoom(Room *newRoom, size_t roomsCreated, char password[DEFAULT_BUFFERSIZE]){
     (*newRoom).roomID = (roomsCreated + 1);
     (*newRoom).numberOfConnectedSockets = 0;
-    strcpy((*newRoom).password, password);
+    (*newRoom).connectedClientSockets = NULL;
+    strncpy(newRoom->password, password, sizeof(newRoom->password) - 1);
+    newRoom->password[sizeof(newRoom->password) - 1] = '\0';
+    
 }
-//Deletes a room by performing the shifting
-//and then reallocating the rooms array memory (removing the size of one Room)
-void deleteRoom(Room **rooms, Room *room, size_t *roomLength, size_t roomIndex){
+
+//Deletes a room, replaces the room that needs to be deleted by the last element
+//and then removing the last element
+
+//e.g. Room1, room2, room3, room4, we want to delete room2
+//Step 1. replace room with last room
+//Room1, room4, room3, room4
+//Step2. remove last element
+//Room1, room4, room3
+void deleteRoom(Room **rooms, Room *room, size_t *roomLength, size_t *roomCapacity, size_t roomIndex){
     printf("Deleting room! \n");
 
     free((*room).connectedClientSockets);
     (*room).connectedClientSockets = NULL;
 
-    for(size_t i = roomIndex; i < (*roomLength) - 1; i++){
-        (*rooms)[i] = (*rooms)[i+1];
-    }
-
     if((*roomLength) == 1){
-        printf("le thing");
         free((*rooms));
         (*rooms) = NULL;
         (*roomLength)--;
+        (*roomCapacity) = 0;
         return;
     }
 
-    Room *temp = realloc((*rooms), sizeof(Room) * ((*roomLength) - 1));
-    if(temp == NULL){
-        printf("ERROR: Delete room reallocation failed \n");
-        return;
-    }
-
-    (*rooms) = temp;
     (*roomLength)--;
+    (*rooms)[roomIndex] = (*rooms)[(*roomLength)];
     printf("Deleting room successfull! \n");
-
 }
 
 //loops through rooms to find a room with the same ID as given
@@ -542,7 +569,7 @@ void sendSYSMessageinRoom(Room connectedRoom, char message[DEFAULT_BUFFERSIZE], 
         SOCKET recieverSocket = connectedRoom.connectedClientSockets[j];
         if((recieverSocket) == INVALID_SOCKET){
             printf("ERROR: Reciever Socket error \n"); 
-            return;
+            continue;
         }
         printf("reciever socket is valid \n");
         int iSendResult = send((recieverSocket), message, messageLength, 0);
@@ -554,5 +581,27 @@ void sendSYSMessageinRoom(Room connectedRoom, char message[DEFAULT_BUFFERSIZE], 
     }
 }
 
+//frees memory
+void cleanUp(struct addrinfo **result, User **users, size_t usersLength, Room **rooms, size_t roomsLength, SOCKET listenSocket){
+    freeaddrinfo((*result));
+    for(size_t i = 0; i < usersLength; i++){
+        closesocket((*users)[i].clientSocket);
+    }
+    free((*users));
+    closesocket(listenSocket);
+    for(size_t i = 0; i < roomsLength; i++){
+        free((*rooms)[i].connectedClientSockets);
+    }
+    free((*rooms));
+
+    WSACleanup();
+}
+
 //gcc server.c -o server.exe -lws2_32
 ///ncat 127.0.0.1 27015
+
+
+//to do: remove removeClientSocket shifting
+//remove any other unnessecary shiftings
+//update comments
+//update readme.md if nessecary
